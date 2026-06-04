@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 DOMAIN = "wattson"
-VERSION = "0.11.0"
+VERSION = "0.13.0"
 
 STORAGE_VERSION = 1
 STORAGE_KEY = "wattson.data"
@@ -13,6 +13,6 @@ CARD_URL = f"{URL_BASE}/{CARD_FILENAME}"
 
 DEFAULT_PANEL: dict = {
     "name": "Main Panel",
-    "slots": 40,
+    "slots": 20,
     "columns": 2,
 }

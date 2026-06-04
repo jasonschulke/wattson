@@ -2,7 +2,7 @@
  * Statement "spec-sheet" identity (self-themed, light by default).
  * Talks to the wattson integration over the websocket API. */
 
-const CARD_VERSION = "0.11.0";
+const CARD_VERSION = "0.13.0";
 
 function esc(value) {
   if (value === null || value === undefined) return "";
@@ -70,7 +70,7 @@ class WattsonCard extends HTMLElement {
     this._loading = false;
     this._editSlot = null;
     this._editPanel = false;
-    this._edit = { entities: [], devices: [] };
+    this._edit = { entities: [], devices: [], areas: [] };
     this._error = null;
     this._selected = null;
     this._drawerOpen = false;
@@ -241,11 +241,48 @@ class WattsonCard extends HTMLElement {
     out.sort(function (a, b) { return a.name < b.name ? -1 : 1; });
     return out;
   }
-
-  /* ---- editor lifecycle ---- */
+  _areaIdByName(name) {
+    const q = String(name).toLowerCase().trim();
+    if (!q || !this._hass || !this._hass.areas) return null;
+    const ids = Object.keys(this._hass.areas);
+    for (let i = 0; i < ids.length; i++) {
+      const a = this._hass.areas[ids[i]];
+      if (a && a.name && a.name.toLowerCase() === q) return ids[i];
+    }
+    return null;
+  }
+  _searchAreas(query) {
+    const q = String(query).toLowerCase().trim();
+    const have = this._edit.areas || [];
+    const out = [];
+    if (this._hass && this._hass.areas) {
+      const ids = Object.keys(this._hass.areas);
+      for (let i = 0; i < ids.length; i++) {
+        const a = this._hass.areas[ids[i]];
+        if (!a || !a.name) continue;
+        if (have.indexOf(ids[i]) >= 0) continue;
+        if (q && a.name.toLowerCase().indexOf(q) < 0) continue;
+        out.push({ id: ids[i], name: a.name, sub: "HA area" });
+        if (out.length >= MAX_RESULTS) break;
+      }
+    }
+    out.sort(function (a, b) { return a.name < b.name ? -1 : 1; });
+    if (q) {
+      const exact = this._areaIdByName(q);
+      const dupe = have.indexOf(query.trim()) >= 0 || (exact && have.indexOf(exact) >= 0);
+      if (!exact && !dupe) out.unshift({ id: query.trim(), name: 'Add "' + query.trim() + '"', sub: "new custom area", custom: true });
+    }
+    return out;
+  }
+  _addAreaFromText(text) {
+    const t = String(text).trim();
+    if (!t) return;
+    const exact = this._areaIdByName(t);
+    this._addLink("area", exact || t);
+  }
   _openBreaker(slot) {
     const b = this._breaker(slot) || {};
-    this._edit = { entities: (b.entities || []).slice(), devices: (b.devices || []).slice() };
+    this._edit = { entities: (b.entities || []).slice(), devices: (b.devices || []).slice(), areas: (b.areas || []).slice() };
     this._editSlot = slot;
     this._editPanel = false;
     this._render();
@@ -262,9 +299,9 @@ class WattsonCard extends HTMLElement {
     const payload = {
       type: "wattson/save_breaker", slot: slot,
       label: String(val("f-label")).trim(), breaker_type: val("f-type"),
-      area: String(val("f-area")).trim(), status: val("f-status"),
+      status: val("f-status"),
       notes: val("f-notes"), amps: amps,
-      entities: this._edit.entities.slice(), devices: this._edit.devices.slice()
+      entities: this._edit.entities.slice(), devices: this._edit.devices.slice(), areas: this._edit.areas.slice()
     };
     try { const u = await this._hass.callWS(payload); this._data.breakers[String(slot)] = u; this._error = null; }
     catch (err) { this._error = err && err.message ? err.message : String(err); }
@@ -293,16 +330,23 @@ class WattsonCard extends HTMLElement {
   }
 
   /* ---- picker rendering ---- */
+  _editKey(kind) { return kind === "ent" ? "entities" : (kind === "dev" ? "devices" : "areas"); }
+  _kindName(kind, id) {
+    if (kind === "ent") return this._entityName(id);
+    if (kind === "dev") return this._deviceName(id);
+    return this._areaName(id);
+  }
   _renderChips(kind) {
     const box = this.shadowRoot.getElementById(kind + "-chips");
     if (!box) return;
-    const list = this._edit[kind === "ent" ? "entities" : "devices"];
-    const nameFn = kind === "ent" ? this._entityName.bind(this) : this._deviceName.bind(this);
+    const list = this._edit[this._editKey(kind)] || [];
     if (!list.length) { box.innerHTML = '<span class="empty">None linked.</span>'; return; }
     let html = "";
     for (let i = 0; i < list.length; i++) {
       const id = list[i];
-      html += '<span class="chip"><span class="chiptext" title="' + esc(id) + '">' + esc(nameFn(id)) +
+      const custom = (kind === "area" && !(this._hass && this._hass.areas && this._hass.areas[id]));
+      html += '<span class="chip"><span class="chiptext" title="' + esc(id) + '">' + esc(this._kindName(kind, id)) +
+        (custom ? ' <span class="ptag">CUSTOM</span>' : "") +
         '</span><button class="chipx" data-remove-' + kind + '="' + esc(id) + '" title="Remove">&times;</button></span>';
     }
     box.innerHTML = html;
@@ -311,24 +355,24 @@ class WattsonCard extends HTMLElement {
     const box = this.shadowRoot.getElementById(kind + "-results");
     if (!box) return;
     if (!String(query).trim()) { box.innerHTML = ""; box.style.display = "none"; return; }
-    const matches = kind === "ent" ? this._searchEntities(query) : this._searchDevices(query);
+    const matches = kind === "ent" ? this._searchEntities(query) : (kind === "dev" ? this._searchDevices(query) : this._searchAreas(query));
     if (!matches.length) { box.innerHTML = '<div class="res empty">No matches</div>'; box.style.display = "block"; return; }
     let html = "";
     for (let i = 0; i < matches.length; i++) {
-      html += '<div class="res" data-add-' + kind + '="' + esc(matches[i].id) + '"><span class="rname">' +
-        esc(matches[i].name) + '</span><span class="rid">' + esc(matches[i].id) + "</span></div>";
+      html += '<div class="res' + (matches[i].custom ? " mk" : "") + '" data-add-' + kind + '="' + esc(matches[i].id) + '"><span class="rname">' +
+        esc(matches[i].name) + '</span><span class="rid">' + esc(matches[i].sub || matches[i].id) + "</span></div>";
     }
     box.innerHTML = html; box.style.display = "block";
   }
   _addLink(kind, id) {
-    const key = kind === "ent" ? "entities" : "devices";
+    const key = this._editKey(kind);
     if (this._edit[key].indexOf(id) < 0) this._edit[key].push(id);
     const input = this.shadowRoot.getElementById(kind + "-search");
     if (input) { input.value = ""; input.focus(); }
     this._renderResults(kind, ""); this._renderChips(kind);
   }
   _removeLink(kind, id) {
-    const key = kind === "ent" ? "entities" : "devices";
+    const key = this._editKey(kind);
     const idx = this._edit[key].indexOf(id);
     if (idx >= 0) this._edit[key].splice(idx, 1);
     this._renderChips(kind);
@@ -350,7 +394,8 @@ class WattsonCard extends HTMLElement {
     const slots = this._data && this._data.panel ? this._data.panel.slots : 24;
     for (let s = 1; s <= slots; s++) {
       const b = this._breaker(s);
-      if (!b || !b.entities || !b.entities.length) return s;
+      const linked = b && ((b.entities && b.entities.length) || (b.devices && b.devices.length) || (b.areas && b.areas.length));
+      if (!linked) return s;
     }
     return 1;
   }
@@ -366,12 +411,37 @@ class WattsonCard extends HTMLElement {
     catch (err) { this._error = err && err.message ? err.message : String(err); }
     this._render();
   }
+  _buildProposals(raw) {
+    const ents = (this._hass && this._hass.entities) ? this._hass.entities : {};
+    const order = [], byDev = {}, loose = [];
+    for (let i = 0; i < raw.length; i++) {
+      const eid = raw[i].entity_id;
+      const ename = raw[i].name || eid;
+      const rec = ents[eid];
+      const did = (rec && rec.device_id) ? rec.device_id : null;
+      if (did) {
+        if (!byDev[did]) { byDev[did] = { kind: "device", id: did, key: "device:" + did, name: this._deviceName(did), entids: [] }; order.push(did); }
+        byDev[did].entids.push(ename);
+      } else {
+        loose.push({ kind: "entity", id: eid, key: "entity:" + eid, name: ename, sub: eid });
+      }
+    }
+    const out = [];
+    for (let i = 0; i < order.length; i++) {
+      const d = byDev[order[i]];
+      const n = d.entids.length;
+      d.sub = n + (n === 1 ? " signal: " : " signals: ") + d.entids.slice(0, 3).join(", ") + (n > 3 ? "..." : "");
+      out.push(d);
+    }
+    return out.concat(loose);
+  }
   async _capture() {
     try {
       const res = await this._hass.callWS({ type: "wattson/discover/capture", slot: this._map.slot });
-      this._map.proposals = (res && res.proposals) ? res.proposals : [];
+      const raw = (res && res.proposals) ? res.proposals : [];
+      this._map.proposals = this._buildProposals(raw);
       this._map.selected = {};
-      for (let i = 0; i < this._map.proposals.length; i++) this._map.selected[this._map.proposals[i].entity_id] = true;
+      for (let i = 0; i < this._map.proposals.length; i++) this._map.selected[this._map.proposals[i].key] = true;
       this._map.phase = "captured";
       this._error = null;
     } catch (err) { this._error = err && err.message ? err.message : String(err); }
@@ -380,14 +450,18 @@ class WattsonCard extends HTMLElement {
   async _acceptProposals() {
     const slot = this._map.slot;
     const b = this._breaker(slot) || {};
-    const merged = (b.entities || []).slice();
-    for (let i = 0; i < this._map.proposals.length; i++) {
-      const id = this._map.proposals[i].entity_id;
-      if (this._map.selected[id] && merged.indexOf(id) < 0) merged.push(id);
+    const devs = (b.devices || []).slice(), ents = (b.entities || []).slice();
+    const has = function (arr, v) { for (let i = 0; i < arr.length; i++) if (arr[i] === v) return true; return false; };
+    const p = this._map.proposals;
+    for (let i = 0; i < p.length; i++) {
+      if (!this._map.selected[p[i].key]) continue;
+      if (p[i].kind === "device") { if (!has(devs, p[i].id)) devs.push(p[i].id); }
+      else { if (!has(ents, p[i].id)) ents.push(p[i].id); }
     }
     try {
-      const payload = { type: "wattson/save_breaker", slot: slot, entities: merged };
-      if (!b.status || b.status === "unknown") payload.status = "confirmed";
+      const payload = { type: "wattson/save_breaker", slot: slot, devices: devs, entities: ents };
+      const anyLink = devs.length || ents.length || (b.areas && b.areas.length);
+      if (anyLink && (!b.status || b.status === "unknown")) payload.status = "confirmed";
       const u = await this._hass.callWS(payload);
       this._data.breakers[String(slot)] = u;
       this._error = null;
@@ -457,11 +531,13 @@ class WattsonCard extends HTMLElement {
     } else {
       for (let a = 0; a < areas.length; a++) {
         const aid = areas[a], m = this._areaMembers(aid);
+        const isHa = !!(this._hass && this._hass.areas && this._hass.areas[aid]);
         const members = [];
         for (let i = 0; i < m.devices.length; i++) members.push({ name: this._deviceName(m.devices[i]), active: this._isDeviceActive(m.devices[i]), device: true });
         for (let j = 0; j < m.entities.length; j++) members.push({ name: this._entityName(m.entities[j]), active: this._isEntityActive(m.entities[j]), device: false });
-        const tree = members.length ? this._areaTreeHtml(members) : "<div class='libnote'>No HA devices/entities in this area yet.</div>";
-        body += "<div class='agroup'><div class='ahead'><span class='atag'>AREA</span><span class='aname'>" + esc(this._areaName(aid)) + "</span>" +
+        const note = isHa ? "No HA devices/entities in this area yet." : "Custom area label - add devices to this breaker directly.";
+        const tree = members.length ? this._areaTreeHtml(members) : "<div class='libnote'>" + note + "</div>";
+        body += "<div class='agroup'><div class='ahead'><span class='atag'>" + (isHa ? "AREA" : "CUSTOM") + "</span><span class='aname'>" + esc(this._areaName(aid)) + "</span>" +
           "<span class='acount'>" + members.length + "</span>" +
           "<button class='unlink' data-unlink-kind='area' data-unlink-id='" + esc(aid) + "' title='Unlink area'>&times;</button></div>" + tree + "</div>";
       }
@@ -540,12 +616,13 @@ class WattsonCard extends HTMLElement {
       ? "<div class='libhint'><span>Tap a breaker to map <b>" + esc(this._pendingName()) + "</b></span><span class='spacer2'></span><button class='ibtn' id='lib-cancelpend' title='Cancel'>&times;</button></div>"
       : "<div class='libhint dim'>Tap or drag an item onto a breaker.</div>";
     return "<div class='sidebar'>" +
+      "<div class='libtop'><span class='libttl'>LIBRARY</span><span class='spacer2'></span><button class='ibtn' id='lib-collapse' title='Collapse library'>&#9664;</button></div>" +
       "<div class='libsearch'><input id='lib-search' type='text' autocomplete='off' placeholder='Search library...' value='" + esc(this._lib.query) + "'></div>" +
       "<div class='libscope'>" +
         "<button class='scbtn" + (this._lib.scope === "unmapped" ? "" : " on") + "' data-scope='all'>All</button>" +
         "<button class='scbtn" + (this._lib.scope === "unmapped" ? " on" : "") + "' data-scope='unmapped'>Unmapped</button>" +
       "</div>" +
-      this._libSection("areas", "Areas") + this._libSection("devices", "Devices") + this._libSection("entities", "Entities") +
+      this._libSection("areas", "Areas") + this._libSection("devices", "Devices") +
       pend + "</div>";
   }
   _libSection(key, label) {
@@ -586,17 +663,10 @@ class WattsonCard extends HTMLElement {
     const devices = [];
     if (this._hass && this._hass.devices) { const k = Object.keys(this._hass.devices); for (let i = 0; i < k.length; i++) { const n = this._deviceName(k[i]); if (!n || n === k[i]) continue; if (q && n.toLowerCase().indexOf(q) < 0) continue; if (unmapped && ms.devices[k[i]]) continue; devices.push({ kind: "device", id: k[i], name: n, sub: "device" }); } }
     devices.sort(function (a, b) { return a.name < b.name ? -1 : 1; });
-    let allEnt = [];
-    if (this._hass && this._hass.states) { const k = Object.keys(this._hass.states); for (let i = 0; i < k.length; i++) { const id = k[i]; const nm = this._entityName(id); if (q && id.toLowerCase().indexOf(q) < 0 && String(nm).toLowerCase().indexOf(q) < 0) continue; if (unmapped && ms.entities[id]) continue; allEnt.push({ kind: "entity", id: id, name: nm, sub: id }); } }
-    allEnt.sort(function (a, b) { return a.name < b.name ? -1 : 1; });
-    const cap = q ? 150 : 60;
-    const entShown = allEnt.slice(0, cap);
     this._fillList("areas", areas);
     this._fillList("devices", devices);
-    this._fillList("entities", entShown, (allEnt.length > entShown.length) ? ("Showing " + entShown.length + " of " + allEnt.length + " - search to narrow") : "");
     this._setText("count-areas", areas.length);
     this._setText("count-devices", devices.length);
-    this._setText("count-entities", allEnt.length);
   }
   _armItem(kind, id) {
     if (this._pendingIs(kind, id)) this._pending = null;
@@ -628,7 +698,8 @@ class WattsonCard extends HTMLElement {
     const meta = [];
     if (b && b.amps) meta.push(esc(b.amps) + "A");
     if (b && b.breaker_type && b.breaker_type === "double") meta.push("2-POLE");
-    if (b && b.area) meta.push(esc(String(b.area).toUpperCase()));
+    if (b && b.areas && b.areas.length) { const nms = []; for (let i = 0; i < b.areas.length; i++) nms.push(this._areaName(b.areas[i])); meta.push(esc(nms.join(", ").toUpperCase())); }
+    else if (b && b.area) meta.push(esc(String(b.area).toUpperCase()));
     const ents = b && b.entities ? b.entities : [];
     const devs = b && b.devices ? b.devices : [];
     const areas = b && b.areas ? b.areas : [];
@@ -663,13 +734,6 @@ class WattsonCard extends HTMLElement {
       const slot = this._editSlot;
       const b = this._breaker(slot) || {};
       const st = b.status || (b.label ? "guess" : "unknown");
-      const areas = this._areaList();
-      let datalist = "";
-      if (areas.length) {
-        let opts = "";
-        for (let i = 0; i < areas.length; i++) opts += '<option value="' + esc(areas[i]) + '"></option>';
-        datalist = '<datalist id="area-list">' + opts + "</datalist>";
-      }
       let typeOpts = "";
       for (let i = 0; i < TYPE_ORDER.length; i++) {
         const t = TYPE_ORDER[i];
@@ -685,11 +749,10 @@ class WattsonCard extends HTMLElement {
         '<label>LABEL<input id="f-label" type="text" value="' + esc(b.label || "") + '" placeholder="e.g. Kitchen counter outlets"></label>' +
         '<div class="row2"><label>AMPS<input id="f-amps" type="number" inputmode="numeric" value="' + (b.amps != null ? esc(b.amps) : "") + '" placeholder="15"></label>' +
         '<label>TYPE<select id="f-type">' + typeOpts + "</select></label></div>" +
-        '<label>AREA<input id="f-area" type="text" list="area-list" value="' + esc(b.area || "") + '" placeholder="Kitchen"></label>' + datalist +
         '<label>STATUS<select id="f-status">' + statusOpts + "</select></label>" +
         '<label>NOTES<textarea id="f-notes" rows="2" placeholder="What does it actually control? How did you confirm it?">' + esc(b.notes || "") + "</textarea></label>" +
-        this._pickerSectionHtml("ent", "LINKED ENTITIES", "Search entities to add...") +
-        this._pickerSectionHtml("dev", "LINKED DEVICES", "Search devices to add...") +
+        this._pickerSectionHtml("area", "AREAS", "Search HA areas, or type a custom name + Enter...") +
+        this._pickerSectionHtml("dev", "DEVICES", "Search devices to add...") +
         '<div class="actions"><button class="btn ghost" id="btn-clear">Clear</button><span class="spacer2"></span>' +
         '<button class="btn" id="btn-cancel">Cancel</button><button class="btn primary" id="btn-save">Save</button></div>' +
         "</div></div>";
@@ -697,8 +760,10 @@ class WattsonCard extends HTMLElement {
     if (this._editPanel) {
       return '<div class="ovl" id="ovl"><div class="dialog"><div class="dlgHead">PANEL SETTINGS</div>' +
         '<label>NAME<input id="p-name" type="text" value="' + esc(panel.name || "") + '"></label>' +
-        '<div class="row2"><label>SLOTS<input id="p-slots" type="number" min="1" max="120" value="' + esc(panel.slots || 24) + '"></label>' +
+        '<div class="row2"><label>SLOTS (BREAKERS)<div class="stepper"><button class="btn sq" id="p-minus" title="Remove a row">&minus;</button>' +
+        '<input id="p-slots" type="number" min="2" max="120" value="' + esc(panel.slots || 20) + '"><button class="btn sq" id="p-plus" title="Add a row">+</button></div></label>' +
         '<label>COLUMNS<input id="p-columns" type="number" min="1" max="4" value="' + esc(panel.columns || 2) + '"></label></div>' +
+        '<div class="dlgnote">Add or remove breakers in pairs (one row). Reducing the count hides the higher-numbered breakers; their labels are kept and reappear if you add the slots back.</div>' +
         '<div class="actions"><span class="spacer2"></span><button class="btn" id="p-cancel">Cancel</button><button class="btn primary" id="p-save">Save</button></div>' +
         "</div></div>";
     }
@@ -730,10 +795,11 @@ class WattsonCard extends HTMLElement {
         list = '<div class="mempty">Nothing dropped. Either nothing on this circuit is a smart device, or it has not gone offline yet. Wait longer and re-capture, or skip.</div>';
       } else {
         for (let i = 0; i < p.length; i++) {
-          const id = p[i].entity_id;
-          const chk = this._map.selected[id] ? " checked" : "";
-          list += '<label class="prop"><input type="checkbox" data-prop="' + esc(id) + '"' + chk + '>' +
-            '<span class="pn">' + esc(p[i].name) + '</span><span class="pid">' + esc(id) + "</span></label>";
+          const it = p[i];
+          const chk = this._map.selected[it.key] ? " checked" : "";
+          const tag = it.kind === "device" ? "DEVICE" : "ENTITY";
+          list += '<label class="prop"><input type="checkbox" data-prop="' + esc(it.key) + '"' + chk + '>' +
+            '<span class="pn">' + esc(it.name) + ' <span class="ptag">' + tag + '</span></span><span class="pid">' + esc(it.sub || it.id) + "</span></label>";
         }
       }
       phaseHtml =
@@ -742,7 +808,7 @@ class WattsonCard extends HTMLElement {
         '<div class="proplist">' + list + "</div>" +
         '<div class="mrow"><button class="btn ghost" id="m-skip">Skip</button><span class="spacer2"></span>' +
         '<button class="btn primary" id="m-accept">Map to ' + pad2(slot) + ' &amp; next &#8250;</button></div>' +
-        '<div class="mhint">Flip the breaker back <b>ON</b> before moving on. Confirm only what truly lost power - a hub on this circuit can drag its devices offline too.</div>';
+        '<div class="mhint">Wattson groups the dropped signals by device. Flip the breaker back <b>ON</b> before moving on, and confirm only what truly lost power - a hub on this circuit can drag its devices offline too.</div>';
     }
     return '<div class="mapbar"><div class="maphead"><span class="mk">MAPPING MODE</span>' +
       '<span class="spacer2"></span><button class="btn ghost" id="m-exit">Exit</button></div>' + phaseHtml + "</div>";
@@ -766,6 +832,7 @@ class WattsonCard extends HTMLElement {
       input.addEventListener("input", function () { self._renderResults(kind, input.value); });
       input.addEventListener("focus", function () { self._renderResults(kind, input.value); });
       input.addEventListener("blur", function () { setTimeout(function () { const r = root.getElementById(kind + "-results"); if (r) r.style.display = "none"; }, 150); });
+      if (kind === "area") input.addEventListener("keydown", function (ev) { if (ev.key === "Enter") { ev.preventDefault(); self._addAreaFromText(input.value); } });
     }
     if (results) results.addEventListener("click", function (ev) { const id = self._findAttr(ev.target, results, "data-add-" + kind); if (id) self._addLink(kind, id); });
     if (chips) chips.addEventListener("click", function (ev) { const id = self._findAttr(ev.target, chips, "data-remove-" + kind); if (id) self._removeLink(kind, id); });
@@ -782,7 +849,15 @@ class WattsonCard extends HTMLElement {
     bind("btn-cancel", function () { self._editSlot = null; self._render(); });
     bind("p-save", function () { self._savePanel(); });
     bind("p-cancel", function () { self._editPanel = false; self._render(); });
-    if (this._editSlot !== null) { this._wirePicker("ent"); this._wirePicker("dev"); }
+    const stepSlots = function (delta) {
+      const inp = root.getElementById("p-slots"); if (!inp) return;
+      let v = parseInt(inp.value, 10); if (isNaN(v)) v = 20;
+      v += delta; if (v < 2) v = 2; if (v > 120) v = 120;
+      inp.value = v;
+    };
+    bind("p-minus", function () { stepSlots(-2); });
+    bind("p-plus", function () { stepSlots(2); });
+    if (this._editSlot !== null) { this._wirePicker("area"); this._wirePicker("dev"); }
   }
   _wireMapping() {
     const root = this.shadowRoot, self = this;
@@ -830,22 +905,31 @@ class WattsonCard extends HTMLElement {
 
     const errbar = this._error ? '<div class="errbar">' + esc(this._error) + "</div>" : "";
     const spec = (this._config.spec) ? esc(this._config.spec) : "PANEL DIRECTORY  /  " + slots + " SLOTS";
-    const mapClass = this._mapping ? " ON" : "";
 
     root.innerHTML =
       "<style>" + this._css() + "</style>" +
       "<ha-card><div class='frame" + (this._bleed ? " bleed" : "") + "'>" +
       "<i class='cb tl'></i><i class='cb tr'></i><i class='cb bl'></i><i class='cb br'></i>" +
       "<div class='tblock'>" +
-        "<div class='tleft'><div class='kicker'>WATTSON</div>" +
-        "<div class='pname'>" + esc(panel.name) + "</div>" +
-        "<div class='spec'>" + spec + "</div></div>" +
-        "<div class='inst'>" +
-          "<div class='readouts'>" +
-            "<div class='ro'><span class='l'>MAPPED</span><span class='v'>" + (confirmed + tentative) + " / " + slots + "</span></div>" +
-            "<div class='ro'><span class='l'>TENTATIVE</span><span class='v'>" + pad2(tentative) + "</span></div>" +
+        "<div class='trow'>" +
+          "<div class='tleft'><div class='kicker'>WATTSON</div>" +
+            "<div class='pname'>" + esc(panel.name) + "</div>" +
+            "<div class='spec'>" + spec + "</div></div>" +
+          "<div class='inst'>" +
+            "<div class='readouts'>" +
+              "<div class='ro'><span class='l'>MAPPED</span><span class='v'>" + (confirmed + tentative) + " / " + slots + "</span></div>" +
+              "<div class='ro'><span class='l'>TENTATIVE</span><span class='v'>" + pad2(tentative) + "</span></div>" +
+            "</div>" +
+            "<div class='matrixbox'><span class='matrix'>" + matrixSVG(pad2(energized), "#f5a200", "#d4d8e0") + "</span><span class='cap'>ENERGIZED</span></div>" +
           "</div>" +
-          "<div class='matrixbox'><span class='matrix'>" + matrixSVG(pad2(energized), "#f5a200", "#d4d8e0") + "</span><span class='cap'>ENERGIZED</span></div>" +
+        "</div>" +
+        "<div class='hbar'>" +
+          "<span class='k'><span class='sw-solid'></span> CONFIRMED</span>" +
+          "<span class='k'><span class='sw-dash'></span> TENTATIVE</span>" +
+          "<span class='k'><span class='sw-hot'></span> ENERGIZED</span>" +
+          "<span class='spacer2'></span>" +
+          (this._mapping ? "" : "<button class='btn sm" + (this._sidebar ? " ON" : "") + "' id='open-lib'>" + (this._sidebar ? "&#9664; Library" : "Library &#9654;") + "</button>") +
+          "<button class='btn sq' id='open-panel' title='Panel settings'>&#9881;</button>" +
         "</div>" +
       "</div>" +
       errbar +
@@ -855,15 +939,6 @@ class WattsonCard extends HTMLElement {
           "<div class='panel'><div class='bus'></div><div class='gridwrap'><div class='banks" + (this._pulse ? "" : " nopulse") + "'>" + cells + "</div></div></div>" +
           this._inspectorHtml() +
         "</div>" +
-      "</div>" +
-      "<div class='legend'>" +
-        "<span class='k'><span class='sw-solid'></span> CONFIRMED</span>" +
-        "<span class='k'><span class='sw-dash'></span> TENTATIVE</span>" +
-        "<span class='k'><span class='sw-hot'></span> ENERGIZED</span>" +
-        "<span class='spacer2'></span>" +
-        "<button class='btn lib" + (this._sidebar ? " ON" : "") + "' id='open-lib'>" + (this._sidebar ? "Hide library" : "Library") + "</button>" +
-        "<button class='btn map" + mapClass + "' id='open-map'>" + (this._mapping ? "Mapping..." : "Map circuits") + "</button>" +
-        "<button class='btn sq' id='open-panel' title='Panel settings'>&#9881;</button>" +
       "</div>" +
       (this._mapping ? this._mappingBarHtml() : "") +
       "</div></ha-card>" +
@@ -903,6 +978,8 @@ class WattsonCard extends HTMLElement {
 
     const olib = root.getElementById("open-lib");
     if (olib) olib.addEventListener("click", function () { self._sidebar = !self._sidebar; self._render(); });
+    const lcol = root.getElementById("lib-collapse");
+    if (lcol) lcol.addEventListener("click", function () { self._sidebar = false; self._render(); });
 
     const sb = root.querySelector(".sidebar");
     if (sb) {
@@ -981,21 +1058,24 @@ class WattsonCard extends HTMLElement {
       ".cb{position:absolute;width:12px;height:12px;border:2px solid var(--pm-ink);z-index:2}" +
       ".cb.tl{top:6px;left:6px;border-right:none;border-bottom:none}.cb.tr{top:6px;right:6px;border-left:none;border-bottom:none}" +
       ".cb.bl{bottom:6px;left:6px;border-right:none;border-top:none}.cb.br{bottom:6px;right:6px;border-left:none;border-top:none}" +
-      ".tblock{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;padding:15px 18px;border-bottom:1.5px solid var(--pm-ink)}" +
-      ".kicker{font-family:var(--pm-mono);font-size:.6rem;letter-spacing:.26em;color:var(--pm-indigo);font-weight:700}" +
-      ".pname{font-size:1.4rem;font-weight:800;letter-spacing:-.01em;margin:3px 0 4px}" +
-      ".spec{font-family:var(--pm-mono);font-size:.62rem;letter-spacing:.05em;color:var(--pm-ink-soft)}" +
-      ".inst{display:flex;align-items:center;gap:18px;flex-shrink:0}" +
+      ".tblock{display:flex;flex-direction:column;gap:13px;padding:15px 18px;border-bottom:1.5px solid var(--pm-ink)}" +
+      ".trow{display:flex;justify-content:space-between;align-items:flex-start;gap:16px}" +
+      ".hbar{display:flex;flex-wrap:wrap;align-items:center;gap:16px;font-family:var(--pm-mono);font-size:.72rem;letter-spacing:.08em;color:var(--pm-ink-soft)}" +
+      ".hbar .k{display:inline-flex;align-items:center;gap:8px}" +
+      ".kicker{font-family:var(--pm-mono);font-size:.72rem;letter-spacing:.26em;color:var(--pm-indigo);font-weight:700}" +
+      ".pname{font-size:1.7rem;font-weight:800;letter-spacing:-.01em;margin:4px 0 5px}" +
+      ".spec{font-family:var(--pm-mono);font-size:.78rem;letter-spacing:.05em;color:var(--pm-ink-soft)}" +
+      ".inst{display:flex;align-items:center;gap:20px;flex-shrink:0}" +
       ".readouts{text-align:right;font-family:var(--pm-mono)}.ro{margin-bottom:5px}" +
-      ".ro .l{font-size:.52rem;letter-spacing:.18em;color:var(--pm-ink-soft);display:block}.ro .v{font-size:.95rem;font-weight:700;letter-spacing:.04em}" +
+      ".ro .l{font-size:.62rem;letter-spacing:.18em;color:var(--pm-ink-soft);display:block}.ro .v{font-size:1.15rem;font-weight:700;letter-spacing:.04em}" +
       ".matrixbox{display:flex;flex-direction:column;align-items:flex-end;gap:5px}.matrix svg{display:block}" +
-      ".matrixbox .cap{font-family:var(--pm-mono);font-size:.5rem;letter-spacing:.2em;color:var(--pm-ink-soft)}" +
+      ".matrixbox .cap{font-family:var(--pm-mono);font-size:.6rem;letter-spacing:.2em;color:var(--pm-ink-soft)}" +
       ".errbar{margin:10px 18px 0;padding:7px 11px;border:1px solid var(--pm-amber);border-radius:4px;background:rgba(245,162,0,.1);font-family:var(--pm-mono);font-size:.66rem;color:var(--pm-ink)}" +
       ".panel{position:relative;padding:16px 18px}" +
       ".bus{position:absolute;top:15px;bottom:15px;left:50%;width:6px;transform:translateX(-50%);border-left:1px solid var(--pm-line);border-right:1px solid var(--pm-line)}" +
       ".gridwrap{container-type:inline-size}" +
-      ".banks{display:grid;grid-template-columns:1fr 1fr;column-gap:34px;row-gap:8px}" +
-      ".block{position:relative;display:flex;align-items:center;gap:10px;min-height:50px;padding:8px 11px;background:rgba(255,255,255,.62);border:1px solid var(--pm-line);border-radius:3px;cursor:pointer}" +
+      ".banks{display:grid;grid-template-columns:1fr 1fr;column-gap:34px;row-gap:6px}" +
+      ".block{position:relative;display:flex;align-items:center;gap:10px;min-height:40px;padding:6px 10px;background:rgba(255,255,255,.62);border:1px solid var(--pm-line);border-radius:3px;cursor:pointer}" +
       ".block.confirmed{border:1px solid var(--pm-ink)}" +
       ".block.guess{border:1px dashed var(--pm-ink-soft)}" +
       ".block.unknown{border:1px dashed var(--pm-line);opacity:.62}" +
@@ -1006,27 +1086,30 @@ class WattsonCard extends HTMLElement {
       ".block.hot.unknown{opacity:1}" +
       "@keyframes pmpulse{0%{box-shadow:0 0 5px 0 rgba(245,162,0,.30)}50%{box-shadow:0 0 14px 2px rgba(245,162,0,.62)}100%{box-shadow:0 0 5px 0 rgba(245,162,0,.30)}}" +
       ".banks:not(.nopulse) .block.hot{animation:pmpulse 3s ease-in-out infinite}" +
-      ".tab{font-family:var(--pm-mono);font-size:.6rem;letter-spacing:.03em;color:var(--pm-ink-soft);border:1px solid var(--pm-line);border-radius:2px;padding:2px 4px;background:var(--pm-paper);flex:0 0 auto}" +
+      ".tab{font-family:var(--pm-mono);font-size:.74rem;letter-spacing:.03em;color:var(--pm-ink-soft);border:1px solid var(--pm-line);border-radius:2px;padding:2px 5px;background:var(--pm-paper);flex:0 0 auto}" +
       ".bd{flex:1;min-width:0}" +
       ".lbl{font-size:.92rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:-.005em}" +
       ".lbl .empty{font-family:var(--pm-mono);font-size:.6rem;letter-spacing:.22em;color:var(--pm-line);font-weight:700}" +
       ".mt{font-family:var(--pm-mono);font-size:.58rem;letter-spacing:.06em;color:var(--pm-ink-soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}" +
       ".lk{font-family:var(--pm-mono);font-size:.52rem;letter-spacing:.1em;color:var(--pm-indigo);border:1px solid var(--pm-indigo-soft);border-radius:999px;padding:2px 7px;background:rgba(74,91,216,.07);white-space:nowrap;flex:0 0 auto}" +
-      ".sw{position:relative;width:30px;height:16px;border:1.5px solid var(--pm-ink);border-radius:4px;flex:0 0 auto;background:transparent}" +
+      ".sw{position:relative;width:26px;height:14px;border:1.5px solid var(--pm-ink);border-radius:4px;flex:0 0 auto;background:transparent}" +
       ".sw::after{content:\"\";position:absolute;top:50%;transform:translateY(-50%);width:42%;height:58%;border-radius:2px;background:var(--pm-ink);transition:.25s}" +
       ".sw.r::after{right:2px;left:auto}.sw.l::after{left:2px;right:auto}" +
       ".block.hot .sw{border-color:var(--pm-amber)}.block.hot .sw::after{background:var(--pm-amber);box-shadow:0 0 7px rgba(245,162,0,.85)}" +
-      "@container (min-width:520px){.block{min-height:58px;padding:10px 13px}.lbl{font-size:1.02rem}.mt{font-size:.62rem}.sw{width:38px;height:19px}}" +
-      "@container (min-width:680px){.banks{gap:9px}.block{min-height:64px}.lbl{font-size:1.06rem}.sw{width:44px;height:21px}}" +
-      ".legend{display:flex;flex-wrap:wrap;align-items:center;gap:14px;padding:12px 18px;border-top:1.5px solid var(--pm-ink);font-family:var(--pm-mono);font-size:.58rem;letter-spacing:.08em;color:var(--pm-ink-soft)}" +
-      ".legend .k{display:inline-flex;align-items:center;gap:7px}" +
+      "@container (min-width:520px){.block{min-height:44px;padding:7px 11px}.lbl{font-size:1.02rem}.mt{font-size:.62rem}.sw{width:32px;height:16px}}" +
+      "@container (min-width:680px){.banks{row-gap:7px}.block{min-height:48px}.lbl{font-size:1.06rem}.sw{width:36px;height:18px}}" +
       ".sw-solid{width:18px;height:12px;border:1px solid var(--pm-ink);border-radius:2px}" +
       ".sw-dash{width:18px;height:12px;border:1px dashed var(--pm-ink-soft);border-radius:2px}" +
       ".sw-hot{width:18px;height:12px;border:1px solid var(--pm-amber);border-radius:2px;box-shadow:0 0 8px rgba(245,162,0,.55)}" +
       ".spacer2{flex:1}" +
-      ".btn{font-family:var(--pm-mono);font-size:.66rem;letter-spacing:.05em;padding:6px 11px;border-radius:5px;border:1px solid var(--pm-line);background:var(--pm-card);color:var(--pm-ink);cursor:pointer}" +
+      ".btn{font-family:var(--pm-mono);font-size:.8rem;letter-spacing:.05em;padding:7px 13px;border-radius:5px;border:1px solid var(--pm-line);background:var(--pm-card);color:var(--pm-ink);cursor:pointer}" +
       ".btn:hover{border-color:var(--pm-ink-soft)}" +
-      ".btn.sq{padding:6px 9px}" +
+      ".btn.sq{padding:7px 10px;font-size:.98rem;line-height:1}" +
+      ".btn.sm{font-size:.76rem;padding:6px 11px}" +
+      ".btn.sm.ON{background:var(--pm-ink);border-color:var(--pm-ink);color:#fff}" +
+      ".stepper{display:flex;align-items:center;gap:7px;margin-top:4px}" +
+      ".stepper input{width:70px;text-align:center}" +
+      ".dlgnote{font-family:var(--pm-mono);font-size:.72rem;line-height:1.5;color:var(--pm-ink-soft);margin:4px 0 2px}" +
       ".btn.primary{background:var(--pm-indigo);border-color:var(--pm-indigo);color:#fff}" +
       ".btn.ghost{background:none;border-color:transparent;color:var(--pm-ink-soft)}" +
       ".btn.map.ON{background:var(--pm-amber);border-color:var(--pm-amber);color:#3a2a00}" +
@@ -1044,56 +1127,60 @@ class WattsonCard extends HTMLElement {
       ".dotpulse{width:10px;height:10px;border-radius:50%;background:var(--pm-amber);flex:0 0 auto;animation:pmpulse2 1.2s ease-in-out infinite}" +
       "@keyframes pmpulse2{0%{box-shadow:0 0 0 0 rgba(245,162,0,.6);opacity:1}70%{box-shadow:0 0 0 7px rgba(245,162,0,0);opacity:.7}100%{opacity:1}}" +
       ".proplist{display:flex;flex-direction:column;gap:5px;margin:4px 0 10px;max-height:220px;overflow:auto}" +
-      ".prop{display:flex;align-items:center;gap:9px;padding:7px 9px;border:1px solid var(--pm-line);border-radius:4px;background:var(--pm-card);cursor:pointer}" +
-      ".prop input{flex:0 0 auto}" +
-      ".prop .pn{font-size:.86rem;font-weight:600}" +
-      ".prop .pid{font-family:var(--pm-mono);font-size:.6rem;color:var(--pm-ink-soft);margin-left:auto;white-space:nowrap}" +
-      ".mempty{font-family:var(--pm-mono);font-size:.62rem;line-height:1.5;color:var(--pm-ink-soft);padding:6px 2px 4px}" +
+      ".prop{display:flex;align-items:center;gap:10px;padding:9px 10px;border:1px solid var(--pm-line);border-radius:4px;background:var(--pm-card);cursor:pointer}" +
+      ".prop input{flex:0 0 auto;width:17px;height:17px}" +
+      ".prop .pn{font-size:.98rem;font-weight:600;display:flex;align-items:center;gap:6px;min-width:0}" +
+      ".prop .pid{font-family:var(--pm-mono);font-size:.72rem;color:var(--pm-ink-soft);margin-left:auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:48%}" +
+      ".ptag{font-family:var(--pm-mono);font-size:.58rem;letter-spacing:.1em;color:var(--pm-indigo);border:1px solid var(--pm-indigo-soft);border-radius:3px;padding:1px 4px;flex:0 0 auto}" +
+      ".mempty{font-family:var(--pm-mono);font-size:.82rem;line-height:1.5;color:var(--pm-ink-soft);padding:6px 2px 4px}" +
       ".mempty b{color:var(--pm-ink)}" +
       ".cardbody{display:flex;align-items:stretch}" +
       ".main{position:relative;flex:1 1 auto;min-width:0}" +
-      ".sidebar{flex:0 0 222px;width:222px;border-right:1.5px solid var(--pm-ink);display:flex;flex-direction:column;min-width:0}" +
+      ".sidebar{flex:0 0 262px;width:262px;border-right:1.5px solid var(--pm-ink);display:flex;flex-direction:column;min-width:0}" +
+      ".libtop{display:flex;align-items:center;gap:7px;padding:11px 12px 9px;border-bottom:1px solid var(--pm-line-soft)}" +
+      ".libttl{font-family:var(--pm-mono);font-size:.78rem;letter-spacing:.2em;color:var(--pm-ink);font-weight:700}" +
+      ".libtop .ibtn{font-size:1.05rem}" +
       ".libsearch{padding:9px 9px 8px;border-bottom:1px solid var(--pm-line-soft)}" +
-      ".libsearch input{width:100%;box-sizing:border-box;padding:7px 9px;font-size:.8rem;border:1px solid var(--pm-line);border-radius:6px;background:#fff;color:var(--pm-ink);font-family:inherit}" +
+      ".libsearch input{width:100%;box-sizing:border-box;padding:9px 11px;font-size:1rem;border:1px solid var(--pm-line);border-radius:6px;background:#fff;color:var(--pm-ink);font-family:inherit}" +
       ".libsec{border-bottom:1px solid var(--pm-line-soft)}" +
-      ".libhead{width:100%;display:flex;align-items:center;gap:7px;background:none;border:none;cursor:pointer;padding:9px 11px;font-family:var(--pm-mono);font-size:.6rem;letter-spacing:.14em;color:var(--pm-ink);text-transform:uppercase}" +
-      ".libhead .caret{color:var(--pm-ink-soft);font-size:.66rem;width:.8em}" +
-      ".seccount{margin-left:auto;color:var(--pm-ink-soft);letter-spacing:.04em}" +
-      ".liblist{display:none;max-height:210px;overflow:auto;padding:2px 8px 8px}" +
+      ".libhead{width:100%;display:flex;align-items:center;gap:8px;background:none;border:none;cursor:pointer;padding:11px 12px;font-family:var(--pm-mono);font-size:.84rem;letter-spacing:.14em;color:var(--pm-ink);text-transform:uppercase}" +
+      ".libhead .caret{color:var(--pm-ink-soft);font-size:.84rem;width:.8em}" +
+      ".seccount{margin-left:auto;font-size:.76rem;color:var(--pm-ink-soft);letter-spacing:.04em}" +
+      ".liblist{display:none;max-height:280px;overflow:auto;padding:2px 8px 8px}" +
       ".libsec.open .liblist{display:block}" +
-      ".libitem{display:flex;flex-direction:column;gap:1px;padding:6px 8px;border:1px solid transparent;border-radius:5px;cursor:grab}" +
+      ".libitem{display:flex;flex-direction:column;gap:2px;padding:8px 9px;border:1px solid transparent;border-radius:5px;cursor:grab}" +
       ".libitem:hover{background:var(--pm-paper)}" +
       ".libitem.armed{border-color:var(--pm-indigo);background:rgba(74,91,216,.08)}" +
-      ".liname{font-size:.82rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}" +
-      ".lisub{font-family:var(--pm-mono);font-size:.55rem;color:var(--pm-ink-soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}" +
-      ".libnote{font-family:var(--pm-mono);font-size:.56rem;color:var(--pm-ink-soft);padding:6px 8px}" +
-      ".libhint{display:flex;align-items:center;gap:8px;padding:9px 11px;border-top:1px solid var(--pm-line-soft);font-family:var(--pm-mono);font-size:.58rem;line-height:1.45;color:var(--pm-ink);background:rgba(74,91,216,.06)}" +
+      ".liname{font-size:1.05rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}" +
+      ".lisub{font-family:var(--pm-mono);font-size:.78rem;color:var(--pm-ink-soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}" +
+      ".libnote{font-family:var(--pm-mono);font-size:.78rem;color:var(--pm-ink-soft);padding:6px 8px}" +
+      ".libhint{display:flex;align-items:center;gap:8px;padding:11px 12px;border-top:1px solid var(--pm-line-soft);font-family:var(--pm-mono);font-size:.8rem;line-height:1.45;color:var(--pm-ink);background:rgba(74,91,216,.06)}" +
       ".libhint.dim{color:var(--pm-ink-soft);background:none}.libhint b{color:var(--pm-indigo)}" +
       ".block.dragover{outline:2px dashed var(--pm-indigo);outline-offset:1px;background:rgba(74,91,216,.07)}" +
       ".btn.lib.ON{background:var(--pm-ink);border-color:var(--pm-ink);color:#fff}" +
       ".libscope{display:flex;gap:5px;padding:8px 9px;border-bottom:1px solid var(--pm-line-soft)}" +
-      ".scbtn{flex:1;padding:5px 6px;font-family:var(--pm-mono);font-size:.55rem;letter-spacing:.08em;text-transform:uppercase;border:1px solid var(--pm-line);border-radius:5px;background:#fff;color:var(--pm-ink-soft);cursor:pointer}" +
+      ".scbtn{flex:1;padding:7px 8px;font-family:var(--pm-mono);font-size:.78rem;letter-spacing:.08em;text-transform:uppercase;border:1px solid var(--pm-line);border-radius:5px;background:#fff;color:var(--pm-ink-soft);cursor:pointer}" +
       ".scbtn.on{background:var(--pm-ink);border-color:var(--pm-ink);color:#fff}" +
       ".scrim{position:absolute;inset:0;background:rgba(20,24,36,.18);z-index:15;opacity:0;transition:opacity .2s ease}" +
       ".scrim.open{opacity:1}" +
-      ".drawer{position:absolute;top:0;right:0;height:100%;width:330px;max-width:86%;z-index:16;background:var(--pm-card);border-left:1.5px solid var(--pm-ink);box-shadow:-14px 0 36px rgba(20,24,36,.22);padding:14px 15px;display:flex;flex-direction:column;box-sizing:border-box;transform:translateX(100%);transition:transform .22s ease}" +
+      ".drawer{position:absolute;top:0;right:0;height:100%;width:368px;max-width:88%;z-index:16;background:var(--pm-card);border-left:1.5px solid var(--pm-ink);box-shadow:-14px 0 36px rgba(20,24,36,.22);padding:15px 16px;display:flex;flex-direction:column;box-sizing:border-box;transform:translateX(100%);transition:transform .22s ease}" +
       ".drawer.open{transform:none}" +
-      ".insptop{display:flex;align-items:center;gap:8px;margin-bottom:4px}" +
-      ".insptitle{font-size:1rem;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}" +
-      ".ibtn{border:none;background:none;color:var(--pm-ink-soft);cursor:pointer;font-size:1.05rem;line-height:1;padding:2px 5px;flex:0 0 auto}" +
-      ".inspmeta{font-family:var(--pm-mono);font-size:.56rem;letter-spacing:.08em;color:var(--pm-ink-soft);margin-bottom:9px}" +
+      ".insptop{display:flex;align-items:center;gap:8px;margin-bottom:5px}" +
+      ".insptitle{font-size:1.25rem;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}" +
+      ".ibtn{border:none;background:none;color:var(--pm-ink-soft);cursor:pointer;font-size:1.2rem;line-height:1;padding:2px 5px;flex:0 0 auto}" +
+      ".inspmeta{font-family:var(--pm-mono);font-size:.8rem;letter-spacing:.08em;color:var(--pm-ink-soft);margin-bottom:10px}" +
       ".prows{flex:1;display:flex;flex-direction:column;gap:5px;overflow:auto;padding-right:2px}" +
       ".prow{display:flex;align-items:center;gap:8px;padding:5px 7px;border:1px solid var(--pm-line);border-radius:5px}" +
       ".agroup{border:1px solid var(--pm-line);border-radius:6px;padding:6px 7px;background:var(--pm-paper);display:flex;flex-direction:column;gap:4px}" +
       ".ahead{display:flex;align-items:center;gap:6px}" +
-      ".atag{font-family:var(--pm-mono);font-size:.5rem;letter-spacing:.1em;color:var(--pm-indigo);border:1px solid var(--pm-indigo-soft);border-radius:3px;padding:1px 4px;flex:0 0 auto}" +
-      ".aname{font-weight:700;font-size:.85rem;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}" +
-      ".acount{font-family:var(--pm-mono);font-size:.55rem;color:var(--pm-ink-soft);flex:0 0 auto}" +
+      ".atag{font-family:var(--pm-mono);font-size:.66rem;letter-spacing:.1em;color:var(--pm-indigo);border:1px solid var(--pm-indigo-soft);border-radius:3px;padding:2px 5px;flex:0 0 auto}" +
+      ".aname{font-weight:700;font-size:1.08rem;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}" +
+      ".acount{font-family:var(--pm-mono);font-size:.74rem;color:var(--pm-ink-soft);flex:0 0 auto}" +
       ".agroup .prow{border:none;padding:2px 3px}" +
       ".atree{position:relative}" +
       ".atreesvg{position:absolute;left:0;top:0}" +
       ".amembers{display:flex;flex-direction:column}" +
-      ".mrow{display:flex;align-items:center;gap:7px;height:26px;padding-left:42px;box-sizing:border-box}" +
+      ".mrow{display:flex;align-items:center;gap:8px;height:30px;padding-left:42px;box-sizing:border-box}" +
       ".unlink{border:none;background:none;color:var(--pm-ink-soft);cursor:pointer;font-size:.95rem;line-height:1;padding:2px 5px;flex:0 0 auto}" +
       ".unlink:hover{color:#c0392b}" +
       ".wire{position:relative;width:30px;height:16px;flex:0 0 auto;overflow:hidden}" +
@@ -1105,9 +1192,9 @@ class WattsonCard extends HTMLElement {
       ".pdot{width:9px;height:9px;border-radius:50%;flex:0 0 auto;box-sizing:border-box}" +
       ".pdot.on{background:var(--pm-amber);box-shadow:0 0 6px rgba(245,162,0,.7)}" +
       ".pdot.off{background:none;border:1.4px solid var(--pm-indigo-soft)}" +
-      ".pname2{flex:1;min-width:0;font-size:.82rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}" +
-      ".tagd{font-family:var(--pm-mono);font-size:.5rem;color:var(--pm-indigo);border:1px solid var(--pm-indigo-soft);border-radius:3px;padding:0 3px;margin-left:3px}" +
-      ".pstate{font-family:var(--pm-mono);font-size:.56rem;letter-spacing:.1em;color:var(--pm-ink-soft);flex:0 0 auto}" +
+      ".pname2{flex:1;min-width:0;font-size:1.02rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}" +
+      ".tagd{font-family:var(--pm-mono);font-size:.62rem;color:var(--pm-indigo);border:1px solid var(--pm-indigo-soft);border-radius:3px;padding:0 3px;margin-left:3px}" +
+      ".pstate{font-family:var(--pm-mono);font-size:.78rem;letter-spacing:.1em;color:var(--pm-ink-soft);flex:0 0 auto}" +
       ".pstate.on{color:var(--pm-amber)}" +
       ".inspacts{display:flex;gap:7px;margin-top:9px}" +
       "@container (max-width:560px){.cardbody{flex-direction:column}.sidebar{flex:0 0 auto;width:auto;border-right:none;border-bottom:1.5px solid var(--pm-ink)}.liblist{max-height:160px}}" +
@@ -1122,10 +1209,11 @@ class WattsonCard extends HTMLElement {
       ".picker{margin-bottom:11px}.pickhead{font-family:var(--pm-mono);font-size:.58rem;letter-spacing:.12em;color:var(--pm-ink-soft);margin-bottom:3px}" +
       ".combo{position:relative}" +
       ".results{position:absolute;left:0;right:0;top:100%;z-index:3;max-height:210px;overflow:auto;margin-top:2px;background:var(--pm-card);border:1px solid var(--pm-line);border-radius:6px;box-shadow:0 8px 24px rgba(20,24,36,.22)}" +
-      ".res{display:flex;flex-direction:column;padding:7px 10px;cursor:pointer;border-bottom:1px solid var(--pm-line-soft)}.res:last-child{border-bottom:none}.res:hover{background:var(--pm-paper)}" +
-      ".res.empty{color:var(--pm-ink-soft);cursor:default}.rname{font-size:.86rem}.rid{font-family:var(--pm-mono);font-size:.62rem;color:var(--pm-ink-soft)}" +
+      ".res{display:flex;flex-direction:column;padding:8px 11px;cursor:pointer;border-bottom:1px solid var(--pm-line-soft)}.res:last-child{border-bottom:none}.res:hover{background:var(--pm-paper)}" +
+      ".res.empty{color:var(--pm-ink-soft);cursor:default}.rname{font-size:.95rem}.rid{font-family:var(--pm-mono);font-size:.72rem;color:var(--pm-ink-soft)}" +
+      ".res.mk{background:rgba(74,91,216,.06)}.res.mk .rname{color:var(--pm-indigo);font-weight:600}" +
       ".chips{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px}.chips .empty{font-family:var(--pm-mono);font-size:.6rem;color:var(--pm-ink-soft)}" +
-      ".chip{display:inline-flex;align-items:center;gap:4px;background:rgba(74,91,216,.08);border:1px solid var(--pm-indigo-soft);border-radius:999px;padding:3px 4px 3px 10px;font-size:.76rem;max-width:100%}" +
+      ".chip{display:inline-flex;align-items:center;gap:5px;background:rgba(74,91,216,.08);border:1px solid var(--pm-indigo-soft);border-radius:999px;padding:4px 5px 4px 11px;font-size:.92rem;max-width:100%}" +
       ".chiptext{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:230px}" +
       ".chipx{border:none;background:var(--pm-indigo-soft);color:#fff;border-radius:50%;width:17px;height:17px;line-height:15px;cursor:pointer;font-size:.85rem;padding:0}" +
       ".actions{display:flex;align-items:center;gap:8px;margin-top:2px}"
