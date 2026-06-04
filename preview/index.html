@@ -23,7 +23,7 @@
 <body>
   <div class="topbar">
     <h1>WATTSON</h1>
-    <span class="sub">v0.14.0 preview - drag/tap mapping no longer pops the drawer. Open a breaker to rename it: the number + label are now editable inline. The DEV tag = a Home Assistant device.</span>
+    <span class="sub">v0.15.0 preview - Edit a breaker, open DEVICES, and type a name + Enter to add a non-HA device (e.g. exhaust fan). It is tagged MANUAL and never glows. Storage now has a migration hook.</span>
     <span class="sp"></span>
     <label><input type="checkbox" id="pulse" checked> Pulse</label>
     <label><input type="checkbox" id="sim" checked> Simulate</label>
@@ -34,7 +34,7 @@
  * Statement "spec-sheet" identity (self-themed, light by default).
  * Talks to the wattson integration over the websocket API. */
 
-const CARD_VERSION = "0.14.0";
+const CARD_VERSION = "0.15.0";
 
 function esc(value) {
   if (value === null || value === undefined) return "";
@@ -171,12 +171,14 @@ class WattsonCard extends HTMLElement {
     return id;
   }
   _deviceName(id) {
+    if (id && String(id).indexOf("manual:") === 0) return String(id).slice(7);
     if (this._hass && this._hass.devices && this._hass.devices[id]) {
       const d = this._hass.devices[id];
       return d.name_by_user || d.name || id;
     }
     return id;
   }
+  _isManualDevice(id) { return !!id && String(id).indexOf("manual:") === 0; }
   _areaList() {
     const out = [];
     if (this._hass && this._hass.areas) {
@@ -199,6 +201,7 @@ class WattsonCard extends HTMLElement {
     return true;
   }
   _isDeviceActive(deviceId) {
+    if (this._isManualDevice(deviceId)) return false;
     if (!this._hass || !this._hass.entities) return false;
     const ents = this._hass.entities;
     const keys = Object.keys(ents);
@@ -258,19 +261,24 @@ class WattsonCard extends HTMLElement {
     return out;
   }
   _searchDevices(query) {
-    const q = String(query).toLowerCase().trim();
+    const raw = String(query).trim();
+    const q = raw.toLowerCase();
     const out = [];
-    if (!q || !this._hass || !this._hass.devices) return out;
-    const ids = Object.keys(this._hass.devices);
-    for (let i = 0; i < ids.length; i++) {
-      const id = ids[i];
-      if (this._edit.devices.indexOf(id) >= 0) continue;
-      const name = this._deviceName(id);
-      if (!name || name === id) continue;
-      if (String(name).toLowerCase().indexOf(q) >= 0) out.push({ id: id, name: name });
-      if (out.length >= MAX_RESULTS) break;
+    if (!q) return out;
+    if (this._hass && this._hass.devices) {
+      const ids = Object.keys(this._hass.devices);
+      for (let i = 0; i < ids.length; i++) {
+        const id = ids[i];
+        if (this._edit.devices.indexOf(id) >= 0) continue;
+        const name = this._deviceName(id);
+        if (!name || name === id) continue;
+        if (String(name).toLowerCase().indexOf(q) >= 0) out.push({ id: id, name: name });
+        if (out.length >= MAX_RESULTS) break;
+      }
+      out.sort(function (a, b) { return a.name < b.name ? -1 : 1; });
     }
-    out.sort(function (a, b) { return a.name < b.name ? -1 : 1; });
+    const manualId = "manual:" + raw;
+    if ((this._edit.devices || []).indexOf(manualId) < 0) out.push({ id: manualId, name: 'Add "' + raw + '"', sub: "manual device (not in HA)", custom: true });
     return out;
   }
   _areaIdByName(name) {
@@ -311,6 +319,11 @@ class WattsonCard extends HTMLElement {
     if (!t) return;
     const exact = this._areaIdByName(t);
     this._addLink("area", exact || t);
+  }
+  _addManualDevice(text) {
+    const t = String(text).trim();
+    if (!t) return;
+    this._addLink("dev", "manual:" + t);
   }
   _openBreaker(slot) {
     const b = this._breaker(slot) || {};
@@ -378,9 +391,11 @@ class WattsonCard extends HTMLElement {
     let html = "";
     for (let i = 0; i < list.length; i++) {
       const id = list[i];
-      const custom = (kind === "area" && !(this._hass && this._hass.areas && this._hass.areas[id]));
+      let tag = "";
+      if (kind === "area" && !(this._hass && this._hass.areas && this._hass.areas[id])) tag = "CUSTOM";
+      else if (kind === "dev" && this._isManualDevice(id)) tag = "MANUAL";
       html += '<span class="chip"><span class="chiptext" title="' + esc(id) + '">' + esc(this._kindName(kind, id)) +
-        (custom ? ' <span class="ptag">CUSTOM</span>' : "") +
+        (tag ? ' <span class="ptag">' + tag + '</span>' : "") +
         '</span><button class="chipx" data-remove-' + kind + '="' + esc(id) + '" title="Remove">&times;</button></span>';
     }
     box.innerHTML = html;
@@ -540,10 +555,10 @@ class WattsonCard extends HTMLElement {
     svg += "</svg>";
     return "<div class='atree'>" + svg + "<div class='amembers'>" + rows + "</div></div>";
   }
-  _linkRow(name, active, device, unlinkKind, id) {
+  _linkRow(name, active, tag, unlinkKind, id) {
     return "<div class='prow'><span class='wire " + (active ? "active" : "idle") + "'><span class='wdash'></span><span class='wpulse'></span></span>" +
       "<span class='pdot " + (active ? "on" : "off") + "'></span>" +
-      "<span class='pname2'>" + esc(name) + (device ? " <span class='tagd' title='Home Assistant device'>DEV</span>" : "") + "</span>" +
+      "<span class='pname2'>" + esc(name) + (tag ? " <span class='tagd' title='" + (tag === "DEV" ? "Home Assistant device" : "Manual device - not connected to Home Assistant") + "'>" + tag + "</span>" : "") + "</span>" +
       "<span class='pstate " + (active ? "on" : "") + "'>" + (active ? "ON" : "off") + "</span>" +
       (unlinkKind ? "<button class='unlink' data-unlink-kind='" + unlinkKind + "' data-unlink-id='" + esc(id) + "' title='Unlink'>&times;</button>" : "") +
       "</div>";
@@ -575,8 +590,8 @@ class WattsonCard extends HTMLElement {
           "<span class='acount'>" + members.length + "</span>" +
           "<button class='unlink' data-unlink-kind='area' data-unlink-id='" + esc(aid) + "' title='Unlink area'>&times;</button></div>" + tree + "</div>";
       }
-      for (let i = 0; i < devs.length; i++) body += this._linkRow(this._deviceName(devs[i]), this._isDeviceActive(devs[i]), true, "device", devs[i]);
-      for (let i = 0; i < ents.length; i++) body += this._linkRow(this._entityName(ents[i]), this._isEntityActive(ents[i]), false, "entity", ents[i]);
+      for (let i = 0; i < devs.length; i++) body += this._linkRow(this._deviceName(devs[i]), this._isDeviceActive(devs[i]), this._isManualDevice(devs[i]) ? "MANUAL" : "DEV", "device", devs[i]);
+      for (let i = 0; i < ents.length; i++) body += this._linkRow(this._entityName(ents[i]), this._isEntityActive(ents[i]), "", "entity", ents[i]);
     }
     const numVal = (b.number != null && b.number !== "") ? esc(String(b.number)) : pad2(slot);
     const labelVal = b.label ? esc(b.label) : "";
@@ -807,7 +822,7 @@ class WattsonCard extends HTMLElement {
         '<label>STATUS<select id="f-status">' + statusOpts + "</select></label>" +
         '<label>NOTES<textarea id="f-notes" rows="2" placeholder="What does it actually control? How did you confirm it?">' + esc(b.notes || "") + "</textarea></label>" +
         this._pickerSectionHtml("area", "AREAS", "Search HA areas, or type a custom name + Enter...") +
-        this._pickerSectionHtml("dev", "DEVICES", "Search devices to add...") +
+        this._pickerSectionHtml("dev", "DEVICES", "Search HA devices, or type a name + Enter for a dumb device...") +
         '<div class="actions"><button class="btn ghost" id="btn-clear">Clear</button><span class="spacer2"></span>' +
         '<button class="btn" id="btn-cancel">Cancel</button><button class="btn primary" id="btn-save">Save</button></div>' +
         "</div></div>";
@@ -888,6 +903,7 @@ class WattsonCard extends HTMLElement {
       input.addEventListener("focus", function () { self._renderResults(kind, input.value); });
       input.addEventListener("blur", function () { setTimeout(function () { const r = root.getElementById(kind + "-results"); if (r) r.style.display = "none"; }, 150); });
       if (kind === "area") input.addEventListener("keydown", function (ev) { if (ev.key === "Enter") { ev.preventDefault(); self._addAreaFromText(input.value); } });
+      if (kind === "dev") input.addEventListener("keydown", function (ev) { if (ev.key === "Enter") { ev.preventDefault(); self._addManualDevice(input.value); } });
     }
     if (results) results.addEventListener("click", function (ev) { const id = self._findAttr(ev.target, results, "data-add-" + kind); if (id) self._addLink(kind, id); });
     if (chips) chips.addEventListener("click", function (ev) { const id = self._findAttr(ev.target, chips, "data-remove-" + kind); if (id) self._removeLink(kind, id); });

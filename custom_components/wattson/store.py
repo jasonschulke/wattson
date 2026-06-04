@@ -52,12 +52,32 @@ def _read_seed_file() -> dict[str, Any] | None:
         return None
 
 
+class WattsonStore(Store):
+    """Store subclass that owns schema migrations.
+
+    Home Assistant calls this only when the on-disk document was written by an
+    older STORAGE_VERSION than the one in const.py, so it is a no-op today. When
+    you change the shape of the stored data (rename/restructure a field, not just
+    add an optional one), bump STORAGE_VERSION and add a step below; existing
+    users' data is then upgraded transparently on the next load.
+    """
+
+    async def _async_migrate_func(
+        self, old_major_version: int, old_minor_version: int, old_data: dict[str, Any]
+    ) -> dict[str, Any]:
+        data: dict[str, Any] = old_data or {}
+        # Example for a future bump to STORAGE_VERSION = 2:
+        # if old_major_version < 2:
+        #     data = _migrate_1_to_2(data)
+        return data
+
+
 class PanelStore:
     """Owns the single Wattson document."""
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
-        self._store: Store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
+        self._store: Store = WattsonStore(hass, STORAGE_VERSION, STORAGE_KEY)
         self._data: dict[str, Any] = _generic_default()
 
     async def async_load(self) -> dict[str, Any]:
