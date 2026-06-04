@@ -1,0 +1,11 @@
+{
+  "_comment": "Template only. Copy to seed.json (same folder) to preload a panel on first run. IDs below are placeholders - replace entity_ids, device_ids, and area_ids with ones that exist in your Home Assistant. seed.json is git-ignored so your real layout never lands in the public repo; once you build/edit a panel in the UI it persists in HA's .storage regardless of this file.",
+  "panel": { "name": "Main Panel", "slots": 24, "columns": 2 },
+  "breakers": {
+    "1": { "slot": 1, "label": "Kitchen Lights", "amps": 15, "breaker_type": "single", "area": "Kitchen", "status": "confirmed", "entities": ["light.kitchen"], "devices": [], "areas": [] },
+    "2": { "slot": 2, "label": "Refrigerator", "amps": 20, "breaker_type": "single", "area": "Kitchen", "status": "confirmed", "entities": [], "devices": ["REPLACE_WITH_DEVICE_ID"], "areas": [] },
+    "3": { "slot": 3, "label": "Living Room", "amps": 15, "breaker_type": "single", "status": "guess", "entities": [], "devices": [], "areas": ["REPLACE_WITH_AREA_ID"] },
+    "4": { "slot": 4, "label": "HVAC", "amps": 30, "breaker_type": "double", "status": "confirmed", "entities": ["climate.thermostat"], "devices": [], "areas": [] },
+    "5": { "slot": 5, "label": "", "amps": null, "breaker_type": "single", "status": "unknown", "entities": [], "devices": [], "areas": [] }
+  }
+}
