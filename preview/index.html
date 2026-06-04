@@ -23,7 +23,7 @@
 <body>
   <div class="topbar">
     <h1>WATTSON</h1>
-    <span class="sub">v0.15.0 preview - Edit a breaker, open DEVICES, and type a name + Enter to add a non-HA device (e.g. exhaust fan). It is tagged MANUAL and never glows. Storage now has a migration hook.</span>
+    <span class="sub">v0.17.0 preview - opaque breaker cells + solid sidebar for readability; legend moved right; redundant header Library button removed (shows only when collapsed); light editing overlay; Edit/Map at top of drawer.</span>
     <span class="sp"></span>
     <label><input type="checkbox" id="pulse" checked> Pulse</label>
     <label><input type="checkbox" id="sim" checked> Simulate</label>
@@ -34,7 +34,7 @@
  * Statement "spec-sheet" identity (self-themed, light by default).
  * Talks to the wattson integration over the websocket API. */
 
-const CARD_VERSION = "0.15.0";
+const CARD_VERSION = "0.17.0";
 
 function esc(value) {
   if (value === null || value === undefined) return "";
@@ -556,19 +556,24 @@ class WattsonCard extends HTMLElement {
     return "<div class='atree'>" + svg + "<div class='amembers'>" + rows + "</div></div>";
   }
   _linkRow(name, active, tag, unlinkKind, id) {
-    return "<div class='prow'><span class='wire " + (active ? "active" : "idle") + "'><span class='wdash'></span><span class='wpulse'></span></span>" +
-      "<span class='pdot " + (active ? "on" : "off") + "'></span>" +
+    const manual = tag === "MANUAL";
+    const wireCls = "wire " + (manual ? "manual" : (active ? "active" : "idle"));
+    const dotCls = "pdot " + (manual ? "man" : (active ? "on" : "off"));
+    const stateTxt = manual ? "" : (active ? "ON" : "off");
+    return "<div class='prow'><span class='" + wireCls + "'><span class='wdash'></span><span class='wpulse'></span></span>" +
+      "<span class='" + dotCls + "'></span>" +
       "<span class='pname2'>" + esc(name) + (tag ? " <span class='tagd' title='" + (tag === "DEV" ? "Home Assistant device" : "Manual device - not connected to Home Assistant") + "'>" + tag + "</span>" : "") + "</span>" +
-      "<span class='pstate " + (active ? "on" : "") + "'>" + (active ? "ON" : "off") + "</span>" +
+      "<span class='pstate " + (active && !manual ? "on" : "") + "'>" + stateTxt + "</span>" +
       (unlinkKind ? "<button class='unlink' data-unlink-kind='" + unlinkKind + "' data-unlink-id='" + esc(id) + "' title='Unlink'>&times;</button>" : "") +
       "</div>";
   }
   _inspectorHtml() {
-    if (this._mapping || this._selected === null) return "";
+    if (this._mapping || this._selected === null || this._editSlot !== null) return "";
     const slot = this._selected;
     const b = this._breaker(slot) || {};
-    const nm = b.label ? esc(b.label) : "Unlabeled";
     const areas = b.areas || [], devs = b.devices || [], ents = b.entities || [];
+    const haDevs = [], manDevs = [];
+    for (let i = 0; i < devs.length; i++) { if (this._isManualDevice(devs[i])) manDevs.push(devs[i]); else haDevs.push(devs[i]); }
     const total = areas.length + devs.length + ents.length;
     const meta = [];
     if (b.amps) meta.push(b.amps + "A");
@@ -590,8 +595,15 @@ class WattsonCard extends HTMLElement {
           "<span class='acount'>" + members.length + "</span>" +
           "<button class='unlink' data-unlink-kind='area' data-unlink-id='" + esc(aid) + "' title='Unlink area'>&times;</button></div>" + tree + "</div>";
       }
-      for (let i = 0; i < devs.length; i++) body += this._linkRow(this._deviceName(devs[i]), this._isDeviceActive(devs[i]), this._isManualDevice(devs[i]) ? "MANUAL" : "DEV", "device", devs[i]);
-      for (let i = 0; i < ents.length; i++) body += this._linkRow(this._entityName(ents[i]), this._isEntityActive(ents[i]), "", "entity", ents[i]);
+      if (haDevs.length || ents.length) {
+        body += "<div class='lblgroup'>HA Connected</div>";
+        for (let i = 0; i < haDevs.length; i++) body += this._linkRow(this._deviceName(haDevs[i]), this._isDeviceActive(haDevs[i]), "DEV", "device", haDevs[i]);
+        for (let i = 0; i < ents.length; i++) body += this._linkRow(this._entityName(ents[i]), this._isEntityActive(ents[i]), "", "entity", ents[i]);
+      }
+      if (manDevs.length) {
+        body += "<div class='lblgroup'>Manually Added</div>";
+        for (let i = 0; i < manDevs.length; i++) body += this._linkRow(this._deviceName(manDevs[i]), false, "MANUAL", "device", manDevs[i]);
+      }
     }
     const numVal = (b.number != null && b.number !== "") ? esc(String(b.number)) : pad2(slot);
     const labelVal = b.label ? esc(b.label) : "";
@@ -601,8 +613,8 @@ class WattsonCard extends HTMLElement {
       "<input class='titledit' id='insp-label' value='" + labelVal + "' placeholder='Unlabeled' aria-label='Label'>" +
       "<button class='ibtn' id='insp-close' title='Close'>&times;</button></div>" +
       "<div class='inspmeta'>" + esc(meta.join("  /  ")) + "</div>" +
-      "<div class='prows'>" + body + "</div>" +
       "<div class='inspacts'><button class='btn' id='insp-edit'>Edit</button><button class='btn' id='insp-map'>Map this</button></div>" +
+      "<div class='prows'>" + body + "</div>" +
       "</div>";
   }
   _openDrawer() {
@@ -995,11 +1007,11 @@ class WattsonCard extends HTMLElement {
           "</div>" +
         "</div>" +
         "<div class='hbar'>" +
+          "<span class='spacer2'></span>" +
           "<span class='k'><span class='sw-solid'></span> CONFIRMED</span>" +
           "<span class='k'><span class='sw-dash'></span> TENTATIVE</span>" +
           "<span class='k'><span class='sw-hot'></span> ENERGIZED</span>" +
-          "<span class='spacer2'></span>" +
-          (this._mapping ? "" : "<button class='btn sm" + (this._sidebar ? " ON" : "") + "' id='open-lib'>" + (this._sidebar ? "&#9664; Library" : "Library &#9654;") + "</button>") +
+          ((this._mapping || this._sidebar) ? "" : "<button class='btn sm' id='open-lib'>Library &#9654;</button>") +
           "<button class='btn sq' id='open-panel' title='Panel settings'>&#9881;</button>" +
         "</div>" +
       "</div>" +
@@ -1151,7 +1163,7 @@ class WattsonCard extends HTMLElement {
       ".bus{position:absolute;top:15px;bottom:15px;left:50%;width:6px;transform:translateX(-50%);border-left:1px solid var(--pm-line);border-right:1px solid var(--pm-line)}" +
       ".gridwrap{container-type:inline-size}" +
       ".banks{display:grid;grid-template-columns:1fr 1fr;column-gap:34px;row-gap:6px}" +
-      ".block{position:relative;display:flex;align-items:center;gap:10px;min-height:40px;padding:6px 10px;background:rgba(255,255,255,.62);border:1px solid var(--pm-line);border-radius:3px;cursor:pointer}" +
+      ".block{position:relative;display:flex;align-items:center;gap:10px;min-height:40px;padding:6px 10px;background:rgba(255,255,255,.95);border:1px solid var(--pm-line);border-radius:3px;cursor:pointer}" +
       ".block.confirmed{border:1px solid var(--pm-ink)}" +
       ".block.guess{border:1px dashed var(--pm-ink-soft)}" +
       ".block.unknown{border:1px dashed var(--pm-line);opacity:.62}" +
@@ -1212,7 +1224,7 @@ class WattsonCard extends HTMLElement {
       ".mempty b{color:var(--pm-ink)}" +
       ".cardbody{display:flex;align-items:stretch}" +
       ".main{position:relative;flex:1 1 auto;min-width:0}" +
-      ".sidebar{flex:0 0 262px;width:262px;border-right:1.5px solid var(--pm-ink);display:flex;flex-direction:column;min-width:0}" +
+      ".sidebar{flex:0 0 262px;width:262px;border-right:1.5px solid var(--pm-ink);display:flex;flex-direction:column;min-width:0;background:var(--pm-card)}" +
       ".libtop{display:flex;align-items:center;gap:7px;padding:11px 12px 9px;border-bottom:1px solid var(--pm-line-soft)}" +
       ".libttl{font-family:var(--pm-mono);font-size:.78rem;letter-spacing:.2em;color:var(--pm-ink);font-weight:700}" +
       ".libtop .ibtn{font-size:1.05rem}" +
@@ -1268,20 +1280,25 @@ class WattsonCard extends HTMLElement {
       ".wire.active .wdash{border-color:var(--pm-indigo)}" +
       ".wpulse{position:absolute;top:50%;left:0;width:6px;height:6px;border-radius:50%;background:#ffb01f;box-shadow:0 0 6px rgba(245,162,0,.9);margin-top:-3px;opacity:0}" +
       ".wire.active .wpulse{animation:pmflow 2.6s linear infinite}" +
+      ".wire.manual .wdash{border-color:var(--pm-indigo-soft)}" +
+      ".wire.manual .wpulse{background:var(--pm-indigo);box-shadow:0 0 6px rgba(74,91,216,.85);animation:pmflow 2.6s linear infinite}" +
       "@keyframes pmflow{0%{left:-6px;opacity:0}12%{opacity:1}82%{opacity:1}100%{left:100%;opacity:0}}" +
       ".pdot{width:9px;height:9px;border-radius:50%;flex:0 0 auto;box-sizing:border-box}" +
       ".pdot.on{background:var(--pm-amber);box-shadow:0 0 6px rgba(245,162,0,.7)}" +
       ".pdot.off{background:none;border:1.4px solid var(--pm-indigo-soft)}" +
+      ".pdot.man{background:var(--pm-indigo);box-shadow:0 0 6px rgba(74,91,216,.6)}" +
       ".pname2{flex:1;min-width:0;font-size:1.02rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}" +
       ".tagd{font-family:var(--pm-mono);font-size:.62rem;color:var(--pm-indigo);border:1px solid var(--pm-indigo-soft);border-radius:3px;padding:0 3px;margin-left:3px}" +
       ".pstate{font-family:var(--pm-mono);font-size:.78rem;letter-spacing:.1em;color:var(--pm-ink-soft);flex:0 0 auto}" +
       ".pstate.on{color:var(--pm-amber)}" +
-      ".inspacts{display:flex;gap:7px;margin-top:9px}" +
+      ".inspacts{display:flex;gap:7px;margin:2px 0 11px}" +
+      ".lblgroup{font-family:var(--pm-mono);font-size:.68rem;letter-spacing:.16em;text-transform:uppercase;color:var(--pm-ink-soft);margin:8px 2px 3px;padding-top:6px;border-top:1px solid var(--pm-line-soft)}" +
+      ".prows > .lblgroup:first-child{border-top:none;padding-top:0;margin-top:2px}" +
       "@container (max-width:560px){.cardbody{flex-direction:column}.sidebar{flex:0 0 auto;width:auto;border-right:none;border-bottom:1.5px solid var(--pm-ink)}.liblist{max-height:160px}}" +
       "@media (prefers-reduced-motion: reduce){.wire .wpulse{display:none}.banks .block.hot{animation:none}}" +
       /* overlay */
-      ".ovl{position:fixed;inset:0;background:rgba(20,24,36,.5);display:flex;align-items:center;justify-content:center;z-index:9;padding:16px}" +
-      ".dialog{width:100%;max-width:440px;max-height:92vh;overflow:auto;background:var(--pm-card);color:var(--pm-ink);border:1.5px solid var(--pm-ink);border-radius:8px;padding:16px}" +
+      ".ovl{position:fixed;inset:0;background:rgba(231,235,246,.55);-webkit-backdrop-filter:blur(2px);backdrop-filter:blur(2px);display:flex;align-items:center;justify-content:center;z-index:20;padding:16px}" +
+      ".dialog{width:100%;max-width:440px;max-height:92vh;overflow:auto;background:var(--pm-card);color:var(--pm-ink);border:1.5px solid var(--pm-ink);border-radius:8px;padding:16px;box-shadow:0 20px 54px rgba(20,24,36,.30)}" +
       ".dlgHead{font-family:var(--pm-mono);font-size:.74rem;letter-spacing:.18em;font-weight:700;margin-bottom:13px;color:var(--pm-ink)}" +
       ".dialog label{display:block;font-family:var(--pm-mono);font-size:.58rem;letter-spacing:.12em;color:var(--pm-ink-soft);margin-bottom:11px}" +
       ".dialog input,.dialog select,.dialog textarea{width:100%;box-sizing:border-box;margin-top:4px;padding:8px 10px;font-size:.92rem;border-radius:5px;border:1px solid var(--pm-line);background:#fff;color:var(--pm-ink);font-family:inherit}" +
