@@ -22,6 +22,7 @@ from .const import DEFAULT_PANEL, STORAGE_KEY, STORAGE_VERSION
 
 BREAKER_FIELDS = (
     "label",
+    "number",
     "amps",
     "breaker_type",
     "area",

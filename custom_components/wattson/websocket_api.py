@@ -91,6 +91,7 @@ async def ws_set_panel(hass, connection, msg) -> None:
         vol.Required("type"): "wattson/save_breaker",
         vol.Required("slot"): vol.All(int, vol.Range(min=1, max=120)),
         vol.Optional("label"): str,
+        vol.Optional("number"): str,
         vol.Optional("amps"): vol.Any(None, int),
         vol.Optional("breaker_type"): vol.In(["single", "double", "tandem"]),
         vol.Optional("area"): str,
@@ -108,7 +109,7 @@ async def ws_save_breaker(hass, connection, msg) -> None:
     fields = {
         k: v
         for k, v in msg.items()
-        if k in ("label", "amps", "breaker_type", "area", "status", "notes", "entities", "devices", "areas")
+        if k in ("label", "number", "amps", "breaker_type", "area", "status", "notes", "entities", "devices", "areas")
     }
     breaker = await _store(hass).async_save_breaker(slot, fields)
     connection.send_result(msg["id"], breaker)

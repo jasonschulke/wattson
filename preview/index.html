@@ -23,7 +23,7 @@
 <body>
   <div class="topbar">
     <h1>WATTSON</h1>
-    <span class="sub">v0.13.0 preview - device-centric discovery + multi/custom areas. Edit a breaker to add AREAS (HA or custom) and DEVICES. Click slot 08 (Kitchen) for the area feeder tree.</span>
+    <span class="sub">v0.14.0 preview - drag/tap mapping no longer pops the drawer. Open a breaker to rename it: the number + label are now editable inline. The DEV tag = a Home Assistant device.</span>
     <span class="sp"></span>
     <label><input type="checkbox" id="pulse" checked> Pulse</label>
     <label><input type="checkbox" id="sim" checked> Simulate</label>
@@ -34,7 +34,7 @@
  * Statement "spec-sheet" identity (self-themed, light by default).
  * Talks to the wattson integration over the websocket API. */
 
-const CARD_VERSION = "0.13.0";
+const CARD_VERSION = "0.14.0";
 
 function esc(value) {
   if (value === null || value === undefined) return "";
@@ -328,9 +328,11 @@ class WattsonCard extends HTMLElement {
     const ampsRaw = String(val("f-amps")).trim();
     let amps = ampsRaw === "" ? null : parseInt(ampsRaw, 10);
     if (amps !== null && isNaN(amps)) amps = null;
+    let num = String(val("f-num")).trim();
+    if (num === pad2(slot)) num = "";
     const payload = {
       type: "wattson/save_breaker", slot: slot,
-      label: String(val("f-label")).trim(), breaker_type: val("f-type"),
+      label: String(val("f-label")).trim(), number: num, breaker_type: val("f-type"),
       status: val("f-status"),
       notes: val("f-notes"), amps: amps,
       entities: this._edit.entities.slice(), devices: this._edit.devices.slice(), areas: this._edit.areas.slice()
@@ -532,7 +534,7 @@ class WattsonCard extends HTMLElement {
         svg += "<circle r='3' fill='#ffb01f'><animateMotion dur='2.6s' begin='" + (i * 0.18).toFixed(2) + "s' repeatCount='indefinite' path='M" + trunkX + " 0 L" + trunkX + " " + by + " L" + endX + " " + by + "'/></circle>";
       }
       rows += "<div class='mrow'><span class='pdot " + (it.active ? "on" : "off") + "'></span>" +
-        "<span class='pname2'>" + esc(it.name) + (it.device ? " <span class='tagd'>DEV</span>" : "") + "</span>" +
+        "<span class='pname2'>" + esc(it.name) + (it.device ? " <span class='tagd' title='Home Assistant device'>DEV</span>" : "") + "</span>" +
         "<span class='pstate " + (it.active ? "on" : "") + "'>" + (it.active ? "ON" : "off") + "</span></div>";
     }
     svg += "</svg>";
@@ -541,7 +543,7 @@ class WattsonCard extends HTMLElement {
   _linkRow(name, active, device, unlinkKind, id) {
     return "<div class='prow'><span class='wire " + (active ? "active" : "idle") + "'><span class='wdash'></span><span class='wpulse'></span></span>" +
       "<span class='pdot " + (active ? "on" : "off") + "'></span>" +
-      "<span class='pname2'>" + esc(name) + (device ? " <span class='tagd'>DEV</span>" : "") + "</span>" +
+      "<span class='pname2'>" + esc(name) + (device ? " <span class='tagd' title='Home Assistant device'>DEV</span>" : "") + "</span>" +
       "<span class='pstate " + (active ? "on" : "") + "'>" + (active ? "ON" : "off") + "</span>" +
       (unlinkKind ? "<button class='unlink' data-unlink-kind='" + unlinkKind + "' data-unlink-id='" + esc(id) + "' title='Unlink'>&times;</button>" : "") +
       "</div>";
@@ -576,10 +578,13 @@ class WattsonCard extends HTMLElement {
       for (let i = 0; i < devs.length; i++) body += this._linkRow(this._deviceName(devs[i]), this._isDeviceActive(devs[i]), true, "device", devs[i]);
       for (let i = 0; i < ents.length; i++) body += this._linkRow(this._entityName(ents[i]), this._isEntityActive(ents[i]), false, "entity", ents[i]);
     }
+    const numVal = (b.number != null && b.number !== "") ? esc(String(b.number)) : pad2(slot);
+    const labelVal = b.label ? esc(b.label) : "";
     return "<div class='scrim' id='insp-scrim'></div>" +
       "<div class='drawer" + (this._drawerOpen ? " open" : "") + "'>" +
-      "<div class='insptop'><span class='tab'>" + pad2(slot) + "</span><span class='insptitle'>" + nm + "</span>" +
-      "<span class='spacer2'></span><button class='ibtn' id='insp-close' title='Close'>&times;</button></div>" +
+      "<div class='insptop'><input class='numedit' id='insp-num' value='" + numVal + "' title='Breaker number' aria-label='Breaker number'>" +
+      "<input class='titledit' id='insp-label' value='" + labelVal + "' placeholder='Unlabeled' aria-label='Label'>" +
+      "<button class='ibtn' id='insp-close' title='Close'>&times;</button></div>" +
       "<div class='inspmeta'>" + esc(meta.join("  /  ")) + "</div>" +
       "<div class='prows'>" + body + "</div>" +
       "<div class='inspacts'><button class='btn' id='insp-edit'>Edit</button><button class='btn' id='insp-map'>Map this</button></div>" +
@@ -593,6 +598,23 @@ class WattsonCard extends HTMLElement {
     if (this._drawerOpen) { dr.classList.add("open"); if (sc) sc.classList.add("open"); return; }
     const self = this;
     window.requestAnimationFrame(function () { dr.classList.add("open"); if (sc) sc.classList.add("open"); self._drawerOpen = true; });
+  }
+  async _saveInline() {
+    const root = this.shadowRoot;
+    const slot = this._selected;
+    if (slot === null) return;
+    const numEl = root.getElementById("insp-num");
+    const lblEl = root.getElementById("insp-label");
+    if (!numEl && !lblEl) return;
+    const b = this._breaker(slot) || {};
+    const numRaw = numEl ? String(numEl.value).trim() : "";
+    const lblRaw = lblEl ? String(lblEl.value).trim() : "";
+    const numStore = (numRaw === "" || numRaw === pad2(slot)) ? "" : numRaw;
+    const payload = { type: "wattson/save_breaker", slot: slot, label: lblRaw, number: numStore };
+    if (lblRaw && (!b.status || b.status === "unknown")) payload.status = "guess";
+    try { const u = await this._hass.callWS(payload); this._data.breakers[String(slot)] = u; this._error = null; }
+    catch (err) { this._error = err && err.message ? err.message : String(err); }
+    this._render();
   }
   async _unlink(slot, kind, id) {
     const b = this._breaker(slot) || {};
@@ -717,7 +739,6 @@ class WattsonCard extends HTMLElement {
     try { const u = await this._hass.callWS(payload); this._data.breakers[String(slot)] = u; this._error = null; }
     catch (err) { this._error = err && err.message ? err.message : String(err); }
     this._pending = null;
-    this._selected = slot;
     this._render();
   }
 
@@ -747,8 +768,9 @@ class WattsonCard extends HTMLElement {
     const lbl = b && b.label ? esc(b.label) : '<span class="empty">OPEN</span>';
     const target = (this._mapping && this._map.slot === slot) ? " target" : "";
     const selected = (!this._mapping && this._selected === slot) ? " selected" : "";
+    const numTxt = (b && b.number) ? esc(String(b.number)) : pad2(slot);
     const inner =
-      '<span class="tab">' + pad2(slot) + '</span>' +
+      '<span class="tab">' + numTxt + '</span>' +
       '<div class="bd"><div class="lbl">' + lbl + '</div><div class="mt">' + meta.join("   /   ") + '</div></div>' + lk;
     const body = isLeft ? (inner + sw) : (sw + inner);
     return '<div class="block ' + st + target + selected + '" data-slot="' + slot + '">' + body + "</div>";
@@ -778,7 +800,8 @@ class WattsonCard extends HTMLElement {
       }
       return '<div class="ovl" id="ovl"><div class="dialog">' +
         '<div class="dlgHead">BREAKER ' + pad2(slot) + "</div>" +
-        '<label>LABEL<input id="f-label" type="text" value="' + esc(b.label || "") + '" placeholder="e.g. Kitchen counter outlets"></label>' +
+        '<div class="row2 nl"><label>NO.<input id="f-num" type="text" value="' + esc(b.number || "") + '" placeholder="' + pad2(slot) + '"></label>' +
+        '<label>LABEL<input id="f-label" type="text" value="' + esc(b.label || "") + '" placeholder="e.g. Kitchen counter outlets"></label></div>' +
         '<div class="row2"><label>AMPS<input id="f-amps" type="number" inputmode="numeric" value="' + (b.amps != null ? esc(b.amps) : "") + '" placeholder="15"></label>' +
         '<label>TYPE<select id="f-type">' + typeOpts + "</select></label></div>" +
         '<label>STATUS<select id="f-status">' + statusOpts + "</select></label>" +
@@ -999,6 +1022,11 @@ class WattsonCard extends HTMLElement {
     if (im) im.addEventListener("click", function () { const s = self._selected; self._selected = null; self._mapping = true; self._map = { slot: s || self._firstUnmapped(), phase: "idle", proposals: [], selected: {} }; self._render(); });
     const ic = root.getElementById("insp-close");
     if (ic) ic.addEventListener("click", function () { self._selected = null; self._render(); });
+    const inum = root.getElementById("insp-num");
+    const ilab = root.getElementById("insp-label");
+    const commitInline = function () { self._saveInline(); };
+    if (inum) { inum.addEventListener("change", commitInline); inum.addEventListener("keydown", function (ev) { if (ev.key === "Enter") { ev.preventDefault(); inum.blur(); } }); }
+    if (ilab) { ilab.addEventListener("change", commitInline); ilab.addEventListener("keydown", function (ev) { if (ev.key === "Enter") { ev.preventDefault(); ilab.blur(); } }); }
     const scrim = root.getElementById("insp-scrim");
     if (scrim) scrim.addEventListener("click", function () { self._selected = null; self._render(); });
     const drawer = root.querySelector(".drawer");
@@ -1198,6 +1226,10 @@ class WattsonCard extends HTMLElement {
       ".drawer{position:absolute;top:0;right:0;height:100%;width:368px;max-width:88%;z-index:16;background:var(--pm-card);border-left:1.5px solid var(--pm-ink);box-shadow:-14px 0 36px rgba(20,24,36,.22);padding:15px 16px;display:flex;flex-direction:column;box-sizing:border-box;transform:translateX(100%);transition:transform .22s ease}" +
       ".drawer.open{transform:none}" +
       ".insptop{display:flex;align-items:center;gap:8px;margin-bottom:5px}" +
+      ".numedit{width:48px;text-align:center;font-family:var(--pm-mono);font-size:.92rem;padding:5px 4px;border:1px solid var(--pm-line);border-radius:4px;background:var(--pm-paper);color:var(--pm-ink);flex:0 0 auto;box-sizing:border-box}" +
+      ".numedit:focus{border-color:var(--pm-indigo);outline:none;background:#fff}" +
+      ".titledit{flex:1;min-width:0;font-size:1.2rem;font-weight:700;border:1px solid transparent;border-radius:5px;padding:5px 7px;background:transparent;color:var(--pm-ink);font-family:inherit;box-sizing:border-box}" +
+      ".titledit:hover{border-color:var(--pm-line-soft)}.titledit:focus{border-color:var(--pm-indigo);background:#fff;outline:none}" +
       ".insptitle{font-size:1.25rem;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}" +
       ".ibtn{border:none;background:none;color:var(--pm-ink-soft);cursor:pointer;font-size:1.2rem;line-height:1;padding:2px 5px;flex:0 0 auto}" +
       ".inspmeta{font-family:var(--pm-mono);font-size:.8rem;letter-spacing:.08em;color:var(--pm-ink-soft);margin-bottom:10px}" +
@@ -1237,7 +1269,7 @@ class WattsonCard extends HTMLElement {
       ".dlgHead{font-family:var(--pm-mono);font-size:.74rem;letter-spacing:.18em;font-weight:700;margin-bottom:13px;color:var(--pm-ink)}" +
       ".dialog label{display:block;font-family:var(--pm-mono);font-size:.58rem;letter-spacing:.12em;color:var(--pm-ink-soft);margin-bottom:11px}" +
       ".dialog input,.dialog select,.dialog textarea{width:100%;box-sizing:border-box;margin-top:4px;padding:8px 10px;font-size:.92rem;border-radius:5px;border:1px solid var(--pm-line);background:#fff;color:var(--pm-ink);font-family:inherit}" +
-      ".row2{display:flex;gap:10px}.row2 label{flex:1}" +
+      ".row2{display:flex;gap:10px}.row2 label{flex:1}.row2.nl label:first-child{flex:0 0 84px}" +
       ".picker{margin-bottom:11px}.pickhead{font-family:var(--pm-mono);font-size:.58rem;letter-spacing:.12em;color:var(--pm-ink-soft);margin-bottom:3px}" +
       ".combo{position:relative}" +
       ".results{position:absolute;left:0;right:0;top:100%;z-index:3;max-height:210px;overflow:auto;margin-top:2px;background:var(--pm-card);border:1px solid var(--pm-line);border-radius:6px;box-shadow:0 8px 24px rgba(20,24,36,.22)}" +
@@ -1413,7 +1445,7 @@ function callWS(msg) {
       }
       if (t === "wattson/save_breaker") {
         var k = String(msg.slot); var b = STORE.breakers[k] || {};
-        var f = ["label", "amps", "breaker_type", "area", "status", "notes", "entities", "devices", "areas"];
+        var f = ["label", "number", "amps", "breaker_type", "area", "status", "notes", "entities", "devices", "areas"];
         for (var i = 0; i < f.length; i++) { if (msg[f[i]] !== undefined) b[f[i]] = msg[f[i]]; }
         b.slot = msg.slot; STORE.breakers[k] = b; resolve(clone(b)); return;
       }
