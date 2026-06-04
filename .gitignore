@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# Personal panel data. Your real circuit layout lives here (and, after first
+# build, in Home Assistant's .storage). Keep it out of the public repo - ship
+# seed.example.json as the template instead.
+custom_components/wattson/seed.json

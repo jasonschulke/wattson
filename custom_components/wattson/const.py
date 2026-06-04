@@ -1,0 +1,18 @@
+"""Constants for the Wattson integration."""
+from __future__ import annotations
+
+DOMAIN = "wattson"
+VERSION = "0.11.0"
+
+STORAGE_VERSION = 1
+STORAGE_KEY = "wattson.data"
+
+URL_BASE = "/wattson"
+CARD_FILENAME = "wattson-card.js"
+CARD_URL = f"{URL_BASE}/{CARD_FILENAME}"
+
+DEFAULT_PANEL: dict = {
+    "name": "Main Panel",
+    "slots": 40,
+    "columns": 2,
+}
