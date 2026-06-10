@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 DOMAIN = "wattson"
-VERSION = "0.17.0"
+VERSION = "0.18.0"
 
 STORAGE_VERSION = 1
 STORAGE_KEY = "wattson.data"
